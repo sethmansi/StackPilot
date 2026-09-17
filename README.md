@@ -93,15 +93,21 @@ node dist/index.js create auth-feature feature/auth-schema
 node dist/index.js push   auth-feature feature/auth-service
 node dist/index.js push   auth-feature feature/auth-api
 
-node dist/index.js submit   auth-feature          # push and create/update linked PRs
+node dist/index.js submit   auth-feature          # preview linked PR submission
+node dist/index.js submit   auth-feature --apply  # execute/request approval
 node dist/index.js describe auth-feature --show    # AI descriptions
 node dist/index.js review   auth-feature           # stack-aware review
 node dist/index.js status   auth-feature
+node dist/index.js status   auth-feature --json    # machine-readable stack status
 node dist/index.js top      auth-feature           # switch between stack branches
 node dist/index.js down     auth-feature
 node dist/index.js trunk    auth-feature
+node dist/index.js checkout feature/auth-service   # find a local stack by branch
+node dist/index.js checkout 102                    # or by PR ID
+node dist/index.js validate auth-feature           # check local stack safety
 
-node dist/index.js sync  auth-feature --apply       # plan a restack (asks approval)
+node dist/index.js sync  auth-feature --dry-run     # explain the rebase plan
+node dist/index.js sync  auth-feature --apply       # execute/request approval
 node dist/index.js approvals --pending
 node dist/index.js approve <id>
 
@@ -111,6 +117,9 @@ node dist/index.js audit auth-feature
 
 `submit` is idempotent: it reuses active PRs, fixes their target branches and
 dependency markers when needed, and creates only missing PRs.
+
+`status --json` outputs branches from bottom to top with their PR IDs, target
+branches, dependency IDs, and current status for scripts and CI.
 
 > Tip: the `stackpilot` and `sp` bin names are available after `npm link`.
 

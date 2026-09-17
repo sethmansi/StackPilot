@@ -66,7 +66,12 @@ async function main() {
   };
   await store.setConfig(config);
 
-  const provider = new MockProvider({ branches: ["main"], repositoryUrl: "https://dev.azure.com/contoso/Payments/_git/payments-service" });
+  const provider = new MockProvider({
+    branches: ["main"],
+    repositoryUrl:
+      "https://dev.azure.com/contoso/Payments/_git/payments-service",
+    persistFile: join(root, ".stackpilot", "mock-provider.json"),
+  });
   const git = new MockGitService(seed);
   const ai = new MockAIProvider();
   const engine = new StackManager({ provider, git, ai, store, config });
@@ -79,17 +84,14 @@ async function main() {
   console.log(renderStack(stack, []));
 
   step("2. Submit branches and linked pull requests (bottom-up)");
-  const submitted = await engine.submit("auth-feature");
-  for (const pr of submitted.created) {
+  const submitPlan = await engine.submit("auth-feature", true);
+  if (submitPlan.approval) await engine.approve(submitPlan.approval.id);
+  for (const pr of await engine.prsFor(stack)) {
     console.log(`   ${chalk.green("✓")} PR !${pr.id}  ${pr.sourceBranch} → ${pr.targetBranch}  ${pr.dependsOn.length ? chalk.dim("depends on !" + pr.dependsOn.join(", !")) : ""}`);
   }
-  const repeated = await engine.submit("auth-feature");
-  console.log(
-    chalk.dim(
-      `   Repeated submit: ${repeated.created.length} created, ` +
-        `${repeated.updated.length} updated, ${repeated.reused.length} reused`
-    )
-  );
+  const repeated = await engine.submit("auth-feature", true);
+  if (repeated.approval) await engine.approve(repeated.approval.id);
+  console.log(chalk.dim("   Repeated submit reused all existing PRs"));
   stack = engine.requireStack("auth-feature");
   console.log(renderStack(stack, await engine.prsFor(stack)));
 

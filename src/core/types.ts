@@ -99,6 +99,7 @@ export interface ApprovalRequest {
  */
 export type StackEffect =
   | { kind: "sync"; stackId: string }
+  | { kind: "submit"; stackId: string }
   | { kind: "merge"; stackId: string; bottomBranch: string; bottomPrId: number };
 
 /** A concrete, previewable operation produced by the engine before execution. */

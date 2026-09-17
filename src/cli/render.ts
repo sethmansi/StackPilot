@@ -1,6 +1,51 @@
 import chalk from "chalk";
 import type { PullRequest, Stack } from "../core/types.js";
 
+export interface StackStatus {
+  id: string;
+  name: string;
+  repository: string;
+  trunk: string;
+  branches: Array<{
+    level: number;
+    name: string;
+    targetBranch: string;
+    prId: number | null;
+    status: PullRequest["status"] | "not_created";
+    dependsOn: number[];
+  }>;
+}
+
+export function buildStackStatus(
+  stack: Stack,
+  prs: PullRequest[]
+): StackStatus {
+  const byBranch = new Map(prs.map((pr) => [pr.sourceBranch, pr]));
+  return {
+    id: stack.id,
+    name: stack.name,
+    repository: stack.repository,
+    trunk: stack.trunk,
+    branches: [...stack.branches]
+      .sort((a, b) => a.level - b.level)
+      .map((branch) => {
+        const pr = byBranch.get(branch.name);
+        return {
+          level: branch.level,
+          name: branch.name,
+          targetBranch: pr?.targetBranch ?? branch.base,
+          prId: pr?.id ?? null,
+          status: pr?.status ?? "not_created",
+          dependsOn: pr?.dependsOn ?? [],
+        };
+      }),
+  };
+}
+
+export function renderStackJson(stack: Stack, prs: PullRequest[]): string {
+  return JSON.stringify(buildStackStatus(stack, prs), null, 2);
+}
+
 export function renderStack(stack: Stack, prs: PullRequest[]): string {
   const byBranch = new Map(prs.map((p) => [p.sourceBranch, p]));
   const ordered = [...stack.branches].sort((a, b) => b.level - a.level);

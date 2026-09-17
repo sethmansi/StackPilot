@@ -38,7 +38,7 @@ export async function buildContext(root = process.cwd()): Promise<EngineContext>
   const config = store.getConfig() ?? DEFAULT_CONFIG;
 
   const provider = createProvider(config, root);
-  const git = createGit(config);
+  const git = createGit(config, store);
   const ai = createAI(config);
 
   const engine = new StackManager({ provider, git, ai, store, config });
@@ -67,7 +67,7 @@ function createProvider(config: StackPilotConfig, root: string): Provider {
   });
 }
 
-function createGit(config: StackPilotConfig): GitService {
+function createGit(config: StackPilotConfig, store: StackStore): GitService {
   if (config.provider === "ado") {
     try {
       return new RealGitService();
@@ -75,7 +75,20 @@ function createGit(config: StackPilotConfig): GitService {
       return new MockGitService();
     }
   }
-  return new MockGitService();
+  return new MockGitService({ branchShas: persistedMockShas(store) });
+}
+
+function persistedMockShas(store: StackStore): Record<string, string> {
+  const shas: Record<string, string> = {};
+  for (const stack of store.listStacks()) {
+    for (const branch of stack.branches) {
+      if (branch.lastKnownSha) shas[branch.name] = branch.lastKnownSha;
+      if (branch.lastKnownBaseSha && !shas[branch.base]) {
+        shas[branch.base] = branch.lastKnownBaseSha;
+      }
+    }
+  }
+  return shas;
 }
 
 function createAI(_config: StackPilotConfig): AIProvider {

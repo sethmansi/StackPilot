@@ -78,7 +78,16 @@ export class RealGitService implements GitService {
   }
 
   async hasUncommittedChanges(): Promise<boolean> {
-    return (await this.git(["status", "--porcelain"])).length > 0;
+    const status = await this.git([
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      "--",
+      ".",
+      ":(exclude).stackpilot",
+      ":(exclude).stackpilot/**",
+    ]);
+    return status.length > 0;
   }
 
   async isRebaseInProgress(): Promise<boolean> {
@@ -162,7 +171,12 @@ export class MockGitService implements GitService {
   constructor(private readonly seed?: {
     branchCommits?: Record<string, string[]>;
     branchFiles?: Record<string, string[]>;
-  }) {}
+    branchShas?: Record<string, string>;
+  }) {
+    for (const [branch, sha] of Object.entries(seed?.branchShas ?? {})) {
+      this.shas.set(branch, sha);
+    }
+  }
 
   setCurrent(branch: string): void {
     this.current = branch;

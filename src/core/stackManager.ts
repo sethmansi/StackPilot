@@ -12,7 +12,10 @@ import type {
   StackEffect,
   StackPilotConfig,
 } from "./types.js";
-import { validateStack } from "./stackValidator.js";
+import {
+  validateStack,
+  type ValidationResult,
+} from "./stackValidator.js";
 
 export interface EngineDeps {
   provider: Provider;
@@ -36,11 +39,9 @@ export interface SyncItem {
   operations: PlannedOperation[];
 }
 
-export interface SubmitResult {
-  operations: PlannedOperation[];
-  created: PullRequest[];
-  updated: PullRequest[];
-  reused: PullRequest[];
+export interface CheckoutResult {
+  stack: Stack;
+  branch: string;
 }
 
 export type NavigationTarget = "top" | "bottom" | "up" | "down" | "trunk";
@@ -136,8 +137,84 @@ export class StackManager {
    * Push every branch and make its active PR match the stack, bottom-up.
    * Existing PRs are reused so this operation is safe to run repeatedly.
    */
-  async submit(stackName: string): Promise<SubmitResult> {
+  async submit(stackName: string, apply: boolean): Promise<PlanResult> {
     const stack = this.requireStack(stackName);
+    await validateStack(stack, this.deps.git, "submit");
+    const operations = await this.planSubmit(stack);
+    const messages = operations.map((operation) => operation.description);
+
+    return this.runOrGate({
+      stack,
+      action: "stack.submit",
+      description: `Submit ${stack.name}`,
+      operations,
+      apply,
+      messages,
+      effect: { kind: "submit", stackId: stack.id },
+    });
+  }
+
+  private async planSubmit(stack: Stack): Promise<PlannedOperation[]> {
+    const operations: PlannedOperation[] = [];
+    const activeByBranch = activePullRequestsByBranch(
+      await this.deps.provider.listPullRequests()
+    );
+    let basePr: PullRequest | undefined;
+    let baseBranch: string | undefined;
+
+    for (const branch of [...stack.branches].sort(
+      (a, b) => a.level - b.level
+    )) {
+      operations.push(this.deps.git.planPush(branch.name, false));
+      const dependsOn = basePr ? [basePr.id] : [];
+      const pr = activeByBranch.get(branch.name);
+      const dependency = basePr ? String(basePr.id) : baseBranch;
+
+      if (!pr) {
+        operations.push({
+          kind: "provider",
+          command: `ado pr create --source ${branch.name} --target ${branch.base}`,
+          description: `Create PR for ${branch.name} → ${branch.base}`,
+          mutating: true,
+        });
+        if (baseBranch) {
+          const dependencyLabel = basePr ? `PR !${basePr.id}` : baseBranch;
+          operations.push({
+            kind: "provider",
+            command: `ado pr link --source ${branch.name} --depends-on ${dependency}`,
+            description: `Link ${branch.name} to depend on ${dependencyLabel}`,
+            mutating: true,
+          });
+        }
+      } else {
+        const targetChanged = pr.targetBranch !== branch.base;
+        const dependencyChanged = baseBranch
+          ? !basePr || !sameNumbers(pr.dependsOn, dependsOn)
+          : pr.dependsOn.length > 0;
+        if (targetChanged || dependencyChanged) {
+          operations.push({
+            kind: "provider",
+            command: `ado pr update ${pr.id} --target ${branch.base} --depends-on ${dependency ?? "none"}`,
+            description: `Update PR !${pr.id} to match ${branch.name} → ${branch.base}`,
+            mutating: true,
+          });
+        }
+        if (dependencyChanged && baseBranch) {
+          operations.push({
+            kind: "provider",
+            command: `ado pr link --source ${branch.name} --depends-on ${dependency}`,
+            description: `Link PR !${pr.id} to depend on ${basePr ? `PR !${basePr.id}` : baseBranch}`,
+            mutating: true,
+          });
+        }
+      }
+      basePr = pr;
+      baseBranch = branch.name;
+    }
+    return operations;
+  }
+
+  private async applySubmit(stack: Stack): Promise<void> {
     await validateStack(stack, this.deps.git, "submit");
     const operations: PlannedOperation[] = [];
     const created: PullRequest[] = [];
@@ -227,7 +304,6 @@ export class StackManager {
       details: { operations: operations.map((op) => op.command) },
       applied: true,
     });
-    return { operations, created, updated, reused };
   }
 
   /** Create PRs for any stacked branch that doesn't yet have one, bottom-up. */
@@ -357,8 +433,11 @@ export class StackManager {
         );
         const push = this.deps.git.planPush(b.name, true);
         operations.push(rebase, push);
+        const reason = baseMoved
+          ? `${b.base} moved`
+          : `${b.base} will be rebased`;
         messages.push(
-          `↻ ${b.name} needs restack onto ${b.base} (base moved)`
+          `↻ ${b.name}: replay commits after ${shortSha(oldBaseSha)} onto ${b.base} (${reason})`
         );
         parentWillMove = true;
       } else {
@@ -430,6 +509,11 @@ export class StackManager {
 
   /** Apply the semantic state change for an approved/immediate plan. */
   private async applyEffect(effect: StackEffect): Promise<void> {
+    if (effect.kind === "submit") {
+      await this.applySubmit(this.requireStack(effect.stackId));
+      return;
+    }
+
     if (effect.kind === "sync") {
       const stack = this.requireStack(effect.stackId);
       for (const b of stack.branches) {
@@ -519,17 +603,18 @@ export class StackManager {
       applied: false,
     });
 
-    for (const op of req.operations) await this.deps.git.apply(op);
-    if (req.effect) await this.applyEffect(req.effect);
+    await this.applyPlan(req.operations, req.effect);
 
-    await this.deps.store.appendAudit({
-      action: req.action,
-      actor: this.actor,
-      stackId: req.stackId,
-      summary: `Applied ${req.operations.length} operation(s): ${req.description}`,
-      details: { operations: req.operations.map((o) => o.command) },
-      applied: true,
-    });
+    if (req.action !== "stack.submit") {
+      await this.deps.store.appendAudit({
+        action: req.action,
+        actor: this.actor,
+        stackId: req.stackId,
+        summary: `Applied ${req.operations.length} operation(s): ${req.description}`,
+        details: { operations: req.operations.map((o) => o.command) },
+        applied: true,
+      });
+    }
     return { operations: req.operations, applied: true, messages: [`Applied: ${req.description}`] };
   }
 
@@ -548,6 +633,14 @@ export class StackManager {
   }
 
   // ---- helpers ----------------------------------------------------------
+
+  async validate(stackName: string): Promise<ValidationResult> {
+    return validateStack(
+      this.requireStack(stackName),
+      this.deps.git,
+      "validate"
+    );
+  }
 
   async navigate(
     stackName: string,
@@ -593,6 +686,43 @@ export class StackManager {
       await this.deps.git.switchBranch(destination);
     }
     return destination;
+  }
+
+  async checkout(branchOrPr: string): Promise<CheckoutResult> {
+    const prId = /^\d+$/.test(branchOrPr) ? Number(branchOrPr) : undefined;
+    const matches = this.deps.store
+      .listStacks()
+      .flatMap((stack) =>
+        stack.branches
+          .filter((branch) =>
+            prId === undefined
+              ? branch.name === branchOrPr
+              : branch.prId === prId
+          )
+          .map((branch) => ({ stack, branch: branch.name }))
+      );
+
+    if (matches.length === 0) {
+      throw new Error(
+        prId === undefined
+          ? `Branch ${branchOrPr} is not part of a local stack`
+          : `PR !${prId} is not part of a local stack`
+      );
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `${branchOrPr} matches multiple local stacks; use a unique branch or PR ID`
+      );
+    }
+
+    const match = matches[0];
+    if (!(await this.deps.git.branchExists(match.branch))) {
+      throw new Error(`Branch ${match.branch} does not exist locally`);
+    }
+    if ((await this.deps.git.currentBranch()) !== match.branch) {
+      await this.deps.git.switchBranch(match.branch);
+    }
+    return match;
   }
 
   /**
@@ -644,17 +774,30 @@ export class StackManager {
       };
     }
 
-    for (const op of operations) await this.deps.git.apply(op);
-    await this.applyEffect(effect);
-    await this.deps.store.appendAudit({
-      action,
-      actor: this.actor,
-      stackId: stack.id,
-      summary: `Applied: ${description}`,
-      details: { operations: operations.map((o) => o.command) },
-      applied: true,
-    });
+    await this.applyPlan(operations, effect);
+    if (action !== "stack.submit") {
+      await this.deps.store.appendAudit({
+        action,
+        actor: this.actor,
+        stackId: stack.id,
+        summary: `Applied: ${description}`,
+        details: { operations: operations.map((o) => o.command) },
+        applied: true,
+      });
+    }
     return { operations, applied: true, messages: [...messages, `Applied: ${description}`] };
+  }
+
+  private async applyPlan(
+    operations: PlannedOperation[],
+    effect?: StackEffect
+  ): Promise<void> {
+    if (effect?.kind === "submit") {
+      await this.applyEffect(effect);
+      return;
+    }
+    for (const op of operations) await this.deps.git.apply(op);
+    if (effect) await this.applyEffect(effect);
   }
 
   requireStack(nameOrId: string): Stack {
@@ -717,6 +860,10 @@ function activePullRequestsByBranch(
 
 function sameNumbers(a: number[], b: number[]): boolean {
   return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+function shortSha(sha: string): string {
+  return sha.slice(0, 12);
 }
 
 async function safeSha(git: GitService, branch: string): Promise<string | undefined> {

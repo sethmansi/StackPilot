@@ -3,7 +3,12 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { buildContext, DEFAULT_CONFIG } from "./cli/context.js";
 import { dispatchComment, parseComment } from "./cli/commentCommands.js";
-import { log, renderPlan, renderStack } from "./cli/render.js";
+import {
+  log,
+  renderPlan,
+  renderStack,
+  renderStackJson,
+} from "./cli/render.js";
 import type { StackPilotConfig } from "./core/types.js";
 import { StackStore } from "./store/stackStore.js";
 
@@ -94,18 +99,17 @@ program
 program
   .command("submit <stack>")
   .description("Push branches and create or update all stacked pull requests")
-  .action(async (stackName) => {
+  .option("--apply", "execute (or request approval for) the plan", false)
+  .action(async (stackName, opts) => {
     const ctx = await buildContext();
-    const result = await ctx.engine.submit(stackName);
-    for (const op of result.operations) {
-      log.ok(op.description);
+    const result = await ctx.engine.submit(stackName, opts.apply);
+    log.title("Submit");
+    console.log(renderPlan(result.messages, result.operations));
+    if (result.approval) {
+      log.warn(`Approval required: stackpilot approve ${result.approval.id}`);
+    } else if (result.applied) {
+      log.ok("Submit applied.");
     }
-    log.ok(
-      `Submitted ${stackName}: ${result.created.length} created, ` +
-        `${result.updated.length} updated, ${result.reused.length} reused`
-    );
-    const stack = ctx.engine.requireStack(stackName);
-    console.log(renderStack(stack, await ctx.engine.prsFor(stack)));
   });
 
 // ---- describe -----------------------------------------------------------
@@ -129,10 +133,14 @@ program
 program
   .command("status <stack>")
   .description("Show a stack and its PR states")
-  .action(async (stackName) => {
+  .option("--json", "output machine-readable JSON", false)
+  .action(async (stackName, opts) => {
     const ctx = await buildContext();
     const stack = ctx.engine.requireStack(stackName);
-    console.log(renderStack(stack, await ctx.engine.prsFor(stack)));
+    const prs = await ctx.engine.prsFor(stack);
+    console.log(
+      opts.json ? renderStackJson(stack, prs) : renderStack(stack, prs)
+    );
   });
 
 // ---- list ---------------------------------------------------------------
@@ -153,13 +161,27 @@ program
   .command("sync <stack>")
   .description("Detect drift and restack branches onto their updated bases")
   .option("--apply", "execute (or request approval for) the plan", false)
+  .option("--dry-run", "preview the sync plan without executing", false)
   .action(async (stackName, opts) => {
+    if (opts.apply && opts.dryRun) {
+      throw new Error("Use either --apply or --dry-run, not both");
+    }
     const ctx = await buildContext();
     const result = await ctx.engine.sync(stackName, opts.apply);
-    log.title("Sync");
+    log.title(opts.apply ? "Sync" : "Sync dry run");
     console.log(renderPlan(result.messages, result.operations));
     if (result.approval) log.warn(`Approval required: stackpilot approve ${result.approval.id}`);
     else if (result.applied) log.ok("Sync applied.");
+  });
+
+// ---- validate -----------------------------------------------------------
+program
+  .command("validate <stack>")
+  .description("Check whether a local stack is safe to submit, sync, or merge")
+  .action(async (stackName) => {
+    const ctx = await buildContext();
+    const result = await ctx.engine.validate(stackName);
+    for (const check of result.checks) log.ok(check);
   });
 
 // ---- merge --------------------------------------------------------------
@@ -241,6 +263,15 @@ for (const target of ["top", "bottom", "up", "down", "trunk"] as const) {
       log.ok(`Switched to ${branch}`);
     });
 }
+
+program
+  .command("checkout <branch-or-pr>")
+  .description("Switch to a local stack branch by branch name or PR ID")
+  .action(async (branchOrPr) => {
+    const ctx = await buildContext();
+    const result = await ctx.engine.checkout(branchOrPr);
+    log.ok(`Switched to ${result.branch} in stack ${result.stack.name}`);
+  });
 
 // ---- comment (simulate comment-based command) ---------------------------
 program
